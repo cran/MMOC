@@ -1,0 +1,185 @@
+---
+title: "MMOC_vignette"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{MMOC_vignette}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+```{r setup}
+library(MMOC)
+
+## For plotting
+library(plotly)
+```
+
+This R package contains function for simulating multi-view data, calculating kernels from raw data, calculating graph Laplacians from kernel functions, and estimating joint clustering spaces for multi-view spectral clustering. The joint spaces are estimated using different approaches both based on the flag manifold.
+
+
+## Data Simulation
+
+### clustStruct
+
+We provide the `clustStruct` function (as in, "cluster structure") to simulate multi-view data sets. The data sets are all simulated from a multivariate normal distribution using the `mvrnorm` function from the `MASS` package. The data sets will all have the same sample size, `n`. You can control the number of features within each view using `p` and the number of clusters in each view using `k`. 
+
+Data are simulated from a $MVN(\mu,I)$ distribution. The mean $\mu$ is drawn from the vector $[0, 2^{1:k-1}]$, e.g., if $k=3$, we draw a third of the data from $MVN(0,\tau I)$, a third from $MVN(2,\tau I)$, and a third from $MVN(4,\tau I)$. In other words, each subset is draw from an $MVN$ distribution with a mean 2 larger than the previous. 
+
+When `noiseDat="random"` extra random noise is added to each view. This random noise is drawn from a $MVN(0,\tau I)$ distribution where `randNoise` $= \tau$. The final data supplied for each view is $\tilde{Z}=Z+E$, where $Z\sim MVN(\mu,I)$ and $E \sim MVN(0,\tau I)$. The data are generated using `mapply` for `k`, `p`, and `randNoise`, meaning you can supply vectors for all three to create views with different numbers of clusters, features, and noise levels.
+
+You may also supply an $n\times p$ data frame to the `noiseDat` argument, in this case all simulated data must have `p` features.
+
+Below is an example of simulating a three view study with 2, 3, and 4 clusters within each view, respectively. There are 60, 90, and 120 features in each view, respectively, and the same amount of random noise is added to each view (`rn=4`).
+
+```{r}
+n <- 120 # Sample size
+k <- c(2,3,4) # Number of clusters
+p <- c(60, 90, 120) # Number of features
+rn <- 4 # Amount of extra noise added to each cluster
+
+dd <- clustStruct(n=n, p=p, k=k)
+```
+
+### trueGroups
+
+We understand that the true clustering structure can be confusing from our simulation procedure. We provide the `trueGroups` function to help with this. It gives a breakdown of the different clustering pairs from each view and gives the number of unique groupings in the `Grps` column. The data we simulated above has 6 unique groups to estimate.
+
+```{r}
+trueGroups(n,k)
+```
+
+## Graph Laplacians
+
+We supply two functions to calculate graph Laplacians from real data sets. The first, `kernelLaplacian`, first calculates a kernel matrix to use as the graph adjacency matrix, $A$. It then calculated the graph Laplacian from this kernel using the `Laplacian` function. If you would like to calculate your own adjacency matrix, you can use the `Laplacian` function instead. 
+
+The `kernelLaplacian` function has four built in kernel functions: the classic linear kernel $$A_{ij} =\langle x_i, x_j\rangle,$$ where $\langle \cdot, \cdot \rangle$ is the dot product, $x_i$ is the vector of $p$ features from subject $i$; the classic Gaussian kernel $$A_{ij} = e^\frac{-||x_i-x_j||_2^2}{\rho},$$ where $||\cdot||_2$ is the Euclidean norm and $\rho$ is a tuning parameter; the Zelnik-Manor self-tuning kernel $$A_{ij} = e^\frac{-||x_i-x_j||_2^2}{s_1s_2},$$ where $s_i$ is the Euclidean distance to the $k^{th}$ nearest neighbor of $x_i$, and the adaptive density-aware kernel from the `Spectrum` package $$A_{ij} = exp\left(\frac{-||x_i-x_j||_2^2}{s_1s_2(CNN(x_i,x_j)+1)}\right),$$ where $CNN(x_i,x_i)$ is the number of points in the intersection between the two sets of nearest neighbors of points $x_i$ and $x_j$. This kernel is state of the art at the time of writing this vignette, and is our recommended kernel for omics data.
+
+We provide the functionality withing the these functions to transform $A$ into the adjacency matrix from $k$-nearest neighbors ($knn$) graph, a mutual $knn$ graph, or an $\epsilon$-graph with the `grf.type` argument. These are all common graph structures, and, in the right data sets, will help remove noise and reveal underlying structures. The option to make any of these weighted adjacency matrices into binary graphs using the `binary.grf` argument is also available.
+
+The Laplacian of a graph is defined as $L = D-A$ and there are multiple matrices referred to as *normalized* Laplacians in the literature. The *symmetric* normalized Laplacian, $L_{sym}=D^{-\frac{1}{2}} L D^{-\frac{1}{2}} = I - D^{-\frac{1}{2}}A D^{-\frac{1}{2}}$, named so because of its form, and the *random walk* normalized Laplacian, $L_{rw} = D^{-1}L = I - D^{-1}A$, named so because of its close relation to random walks along a graph. These two matrices are closely related to one another. The resulting clusters are eigen-spaces are related through the degree matrix. I.e., a vector $u$ is an eigenvector of $L_{rw}$ if and only if $w=D^{1/2}u$ is an eigenvector of $L_{sym}$. Other common choices of normalized Laplacians are *Ng*'s Laplacian, $L_{Ng} = D^{-\frac{1}{2}}A D^{-\frac{1}{2}}$ and Dhanjal's *shifted* normalized Laplacian $L_{shift} = I + D^{-\frac{1}{2}}A D^{-\frac{1}{2}}$. The `laplacain` argument is set to `shift` by default. **It will be important to keep track of this argument when calculating the joint clustering spaces**
+
+Finally `plots=TRUE` the functions will plot the adjacency matrix as a heat map using the `heatmap` function in base R and the spectra of the calculate graph Laplacian.
+
+Below is an example of the output of the `kernelLaplacian` function. This is the same output as the `Laplacian` function as well. We only apply it to one of the simulated data sets as an example, but below that we apply it to all three we simulated while supressing the output plots and summaries.
+
+```{r}
+## shifted Laplacians from a Spectrum Kernel on first data set
+kl1 <- kernelLaplacian(dd[[1]], laplacian='shift')
+```
+
+```{r}
+## shifted Laplacians from a Spectrum Kernel on every data set
+LapList <- lapply(dd, kernelLaplacian, laplacian='shift', plots=FALSE, verbose=FALSE)
+```
+
+## Joint Clustering Spaces
+
+We provide two functions for estimating joint clustering spaces. The first is the `Lapprox` function. This function takes a list of Laplacians and a vector, `k`, to indicate the number of groups in each data set. The function calculates the rank($k$) approximation of each Laplacian matrix, then sums each rank approixmate matrix together and divides by the number of Laplacians. Note that we are indicating that we calculated the *shifted* Laplacians in the section above. These arguments should remain consistent in each step. We apply kmeans clustering within our final space, but other clustering methods may be more appropriate for the final estimations. 
+
+### Approximate Laplacian
+
+The function will output the eigen decomposition of this approximate Laplacian and plot the spectra of the approximate Laplacian by default. The final clustering can then be done on the first $K$ eigenvectors. In this simulation we know that there are a total of 6 groups. 
+
+```{r}
+## Calculating the approximate Laplacain
+LR <- Lapprox(LapList, k=k, laplacian='shift')
+
+## Clustering on the first K eigenvectors (K=6)
+set.seed(234)
+km <- kmeans(LR$vectors[,1:6], centers = 6, nstart = 25)
+clusters <- factor(km$cluster)
+
+## Plotting our estimated clusters in the first 3 eigenvectors
+LR$vectors %>% as.data.frame %>% 
+  mutate(clusters=clusters) %>%
+  plot_ly() %>% 
+  add_markers(x=~V1, y=~V2, z=~V3,
+              color=~clusters, colors='Set1')
+```
+
+### Flag mean 
+
+We also supply a function to calculate the flag mean as a joint clustering space. This is a method for calculating the extrinsic mean of multiple subspaces. Here we use it to calculate an "average subspace" and use this for final clustering. The flag mean employs the singular value decomposition algorithm and returns the standard output from the `svd` function in base R. We cluster using the first $K$ left singular vectors, i.e. the first $K$ vectors in the returned `u` matrix. Please not that we again need to specify the type of Laplacian calculated. 
+
+```{r}
+fm <- flagMean(LapList, k=k, laplacian = 'shift')
+
+set.seed(234)
+km <- kmeans(fm$u[,1:6], centers = 6, nstart = 25)
+clusters <- factor(km$cluster)
+
+## Plotting our estimated clusters in the first 3 left singular vectors
+fm$u %>% as.data.frame %>% 
+  mutate(clusters=clusters) %>%
+  plot_ly() %>% 
+  add_markers(x=~V1, y=~V2, z=~V3,
+              color=~clusters, colors='Set1')
+```
+
+### Estimating K
+
+In this simulation we know that there are 6 groups in the joint data set. Finding the true value of $K$ in your own data set can be very difficult. In our simulations, we found the $traceW$, $Hartigan$, $KL$, $Tau$, and $PtBiserial$ indices from the `NbClust` package were the most reliable, though $traceW$ was the most consistent in all settings.
+
+We recommend using the `NbClust` function to estimate how many clusters are present in the joint space. For the approximate Laplacian, we estimate $K$ in the complete joint space, i.e. estimating $K$ using the first `sum(k)` vectors. We estimate $K$ using every left singular vector in the flag mean. Examples of both of these are below, although the code isn't run. Once $K$ is estimated, we only estimated the final clusters using the first $K$ vectors of the approximated spaces. 
+
+```{r, eval=FALSE}
+LRk <- NbClust(LR$vectors[,1:sum(k)], method = 'keans',
+               index='alllong')
+
+fmk <- NbClust(fm$u, method = 'keans', index='alllong')
+```
+
+## Other Mulit-Omics Methods
+
+Below we demonstrate the estimates from the methods Spectrum, NEMO, and SNF.
+
+```{r}
+library(Spectrum)
+
+dt <- lapply(dd, t)
+dt <- lapply(dt, function(x){
+  rownames(x) <- 1:nrow(x)
+  colnames(x) <- 1:ncol(x)
+  x
+})
+
+spec <- Spectrum(dt, method=2)
+
+fm$u %>% as.data.frame %>% 
+  mutate(clusters=factor(spec$assignments)) %>%
+  plot_ly() %>% 
+  add_markers(x=~V1, y=~V2, z=~V3,
+              color=~clusters, colors='Set1')
+```
+
+```{r}
+library(SNFtool)
+K <- 20;		# number of neighbors, usually (10~30)
+alpha <- 0.5;  	# hyperparameter, usually (0.3~0.8)
+iters <- 20; 	# Number of Iterations, usually (10~20)
+
+Wl <- lapply(dd, function(x){
+  d <- (dist2(as.matrix(x),as.matrix(x)))^(1/2)
+  affinityMatrix(d, K, alpha)
+})
+
+W <- SNF(Wl, K, iters)
+
+## Telling SNF the true number of groups
+snfGroup <- spectralClustering(W, K=6)
+
+fm$u %>% as.data.frame %>% 
+  mutate(clusters=factor(snfGroup)) %>%
+  plot_ly() %>% 
+  add_markers(x=~V1, y=~V2, z=~V3,
+              color=~clusters, colors='Set1')
+
+```
+
